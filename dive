@@ -307,7 +307,8 @@ else
 fi
 
 if [[ "$NO_BUILD" == false ]]; then
-    docker compose build "$SERVICE"
+    echo "Building $SERVICE... (skip with -n)"
+    docker compose build -q "$SERVICE"
 fi
 
 $COMPOSE_CMD up -d --quiet-pull "$SERVICE" &> /dev/null
