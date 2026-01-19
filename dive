@@ -181,6 +181,17 @@ fi
 # Get compose config once (handles any compose file name)
 CONFIG_FILE="/tmp/dive-config-$$.yaml"
 CLEANUP_FILES+=("$CONFIG_FILE")
+
+# Read x-dive.profile directly from compose file before running config
+# (needed because services with profiles are excluded from config output)
+for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
+    if [[ -f "$f" ]]; then
+        DIVE_PROFILE=$(yq '.["x-dive"].profile // ""' "$f" 2>/dev/null)
+        [[ -n "$DIVE_PROFILE" ]] && export COMPOSE_PROFILES="$DIVE_PROFILE"
+        break
+    fi
+done
+
 docker compose config > "$CONFIG_FILE" 2>/dev/null || {
     echo "Error: No compose file found or invalid configuration" >&2
     exit 1
