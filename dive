@@ -1,0 +1,346 @@
+#!/bin/bash
+# Copyright (C) 2026 by Henrik Holst
+# SPDX-License-Identifier: 0BSD
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+set -e
+
+usage() {
+    cat <<EOF
+Usage: dive [options] [service] [-- command...]
+
+A Docker Compose wrapper for interactive container development sessions.
+
+Options:
+  -n, --no-build    Skip building the container
+  -s, --shell PATH  Use specified shell (default: bash)
+  -h, --help        Show this help message
+
+Configuration (x-dive extension in compose file):
+  x-dive:
+    service         Default service when multiple exist
+    shell           Shell path or name (default: bash)
+    init            Commands to run on container entry
+    mounts          Host files/binaries to mount
+    env             Environment variables
+
+Template variables (Go-like text/template syntax):
+  {{.Service}}      Service name
+  {{.Project}}      Compose project name
+  {{.Shell}}        Selected shell
+
+Templates are interpolated in env values, mount paths, and init commands.
+Config is read from compose file, then ~/.config/dive/config.yaml, then CLI.
+Later sources override earlier ones; mounts and env vars are merged.
+EOF
+    exit 0
+}
+
+USER_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/dive/config.yaml"
+CLEANUP_FILES=()
+
+cleanup() {
+    rm -f "${CLEANUP_FILES[@]}"
+}
+trap cleanup EXIT
+
+# Interpolate template variables
+interpolate() {
+    local value="$1"
+    value="${value//\{\{.Service\}\}/$SERVICE}"
+    value="${value//\{\{.Project\}\}/$PROJECT}"
+    value="${value//\{\{.Shell\}\}/$SHELL_NAME}"
+    echo "$value"
+}
+
+# Safe variable expansion (no eval)
+expand_vars() {
+    local value="$1"
+    # Expand $HOME and $XDG_* style variables safely
+    while [[ "$value" =~ \$([A-Za-z_][A-Za-z0-9_]*) ]]; do
+        local var_name="${BASH_REMATCH[1]}"
+        local var_value="${!var_name}"
+        value="${value/\$$var_name/$var_value}"
+    done
+    # Also handle ${VAR} syntax
+    while [[ "$value" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
+        local var_name="${BASH_REMATCH[1]}"
+        local var_value="${!var_name}"
+        value="${value/\$\{$var_name\}/$var_value}"
+    done
+    echo "$value"
+}
+
+# Escape value for YAML double-quoted string
+yaml_escape() {
+    local value="$1"
+    # Escape backslashes first, then double quotes
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    echo "$value"
+}
+
+# Process env vars from a yaml file into ENV_VARS associative array
+process_env() {
+    local file="$1"
+    local base="$2"  # '["x-dive"]' for compose, '' for user config
+    local keys k v
+    keys=$(yq -r ".$base.env // {} | keys | .[]" "$file" 2>/dev/null) || return 0
+    for k in $keys; do
+        v=$(yq -r ".$base.env[\"$k\"]" "$file")
+        v=$(interpolate "$v")
+        ENV_VARS["$k"]="$v"
+    done
+}
+
+# Process mounts from a yaml file into MOUNTS array
+process_mounts() {
+    local file="$1"
+    local base="$2"  # '["x-dive"]' for compose, '' for user config
+    local count
+    count=$(yq ".$base.mounts | length // 0" "$file")
+
+    for ((i = 0; i < count; i++)); do
+        local entry entry_type
+        entry=$(yq -r ".$base.mounts[$i]" "$file")
+        entry_type=$(yq -r ".$base.mounts[$i] | type" "$file")
+
+        if [[ "$entry_type" == "!!str" ]]; then
+            # Interpolate template variables first
+            entry=$(interpolate "$entry")
+
+            if [[ "$entry" != *"/"* && "$entry" != *":"* ]]; then
+                # Simple binary name
+                local binary_path
+                binary_path=$(type -p "$entry" 2>/dev/null || true)
+                if [[ -n "$binary_path" ]]; then
+                    MOUNTS+=("$binary_path:/usr/local/bin/$entry:ro")
+                fi
+            elif [[ "$entry" == *":"* ]]; then
+                # Path string source:target[:mode]
+                local source target mode
+                source=$(echo "$entry" | cut -d: -f1)
+                target=$(echo "$entry" | cut -d: -f2)
+                mode=$(echo "$entry" | cut -d: -f3)
+                source=$(expand_vars "$source")
+                [[ -z "$mode" ]] && mode="ro"
+                if [[ -e "$source" ]]; then
+                    MOUNTS+=("$source:$target:$mode")
+                fi
+            fi
+        elif [[ "$entry_type" == "!!map" ]]; then
+            local binary source target mode
+            binary=$(yq -r ".$base.mounts[$i].binary // \"\"" "$file")
+            source=$(yq -r ".$base.mounts[$i].source // \"\"" "$file")
+            target=$(yq -r ".$base.mounts[$i].target // \"\"" "$file")
+            mode=$(yq -r ".$base.mounts[$i].mode // \"ro\"" "$file")
+
+            # Interpolate template variables
+            binary=$(interpolate "$binary")
+            source=$(interpolate "$source")
+            target=$(interpolate "$target")
+
+            if [[ -n "$binary" ]]; then
+                local binary_path
+                binary_path=$(type -p "$binary" 2>/dev/null || true)
+                if [[ -n "$binary_path" ]]; then
+                    [[ -z "$target" ]] && target="/usr/local/bin/$binary"
+                    MOUNTS+=("$binary_path:$target:$mode")
+                fi
+            elif [[ -n "$source" ]]; then
+                source=$(expand_vars "$source")
+                if [[ -e "$source" && -n "$target" ]]; then
+                    MOUNTS+=("$source:$target:$mode")
+                fi
+            fi
+        fi
+    done
+}
+
+# Check dependencies
+missing=()
+type -p docker >/dev/null || missing+=(docker)
+type -p yq >/dev/null || missing+=(yq)
+docker compose version >/dev/null 2>&1 || missing+=("docker compose plugin")
+
+if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "Error: Missing dependencies: ${missing[*]}" >&2
+    exit 1
+fi
+
+# Get compose config once (handles any compose file name)
+CONFIG_FILE="/tmp/dive-config-$$.yaml"
+CLEANUP_FILES+=("$CONFIG_FILE")
+docker compose config > "$CONFIG_FILE" 2>/dev/null || {
+    echo "Error: No compose file found or invalid configuration" >&2
+    exit 1
+}
+
+# Parse CLI arguments (highest priority)
+CLI_NO_BUILD=false
+CLI_SERVICE=""
+CLI_SHELL=""
+CMD=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help) usage ;;
+        -n|--no-build) CLI_NO_BUILD=true; shift ;;
+        -s|--shell) CLI_SHELL="$2"; shift 2 ;;
+        --) shift; CMD=("$@"); break ;;
+        *) CLI_SERVICE="$1"; shift ;;
+    esac
+done
+
+# Layer 1: Read from compose file (lowest priority)
+SERVICE=$(yq '.["x-dive"].service // ""' "$CONFIG_FILE")
+SHELL_NAME=$(yq '.["x-dive"].shell // "bash"' "$CONFIG_FILE")
+INIT_CMD=$(yq '.["x-dive"].init // ""' "$CONFIG_FILE")
+PROJECT=$(yq '.name // ""' "$CONFIG_FILE")
+[[ -z "$PROJECT" ]] && PROJECT=$(basename "$PWD")
+
+# Layer 2: Override with user config if exists (uses short keys)
+if [[ -f "$USER_CONFIG" ]]; then
+    user_service=$(yq '.service // ""' "$USER_CONFIG")
+    user_shell=$(yq '.shell // ""' "$USER_CONFIG")
+    user_init=$(yq '.init // ""' "$USER_CONFIG")
+    [[ -n "$user_service" ]] && SERVICE="$user_service"
+    [[ -n "$user_shell" ]] && SHELL_NAME="$user_shell"
+    [[ -n "$user_init" ]] && INIT_CMD="$user_init"
+fi
+
+# Layer 3: Override with CLI arguments (highest priority)
+[[ -n "$CLI_SERVICE" ]] && SERVICE="$CLI_SERVICE"
+[[ -n "$CLI_SHELL" ]] && SHELL_NAME="$CLI_SHELL"
+NO_BUILD="$CLI_NO_BUILD"
+
+# Get available services
+mapfile -t SERVICES < <(yq -r '.services | keys | .[]' "$CONFIG_FILE")
+
+if [[ ${#SERVICES[@]} -eq 0 ]]; then
+    echo "Error: No services found in docker compose" >&2
+    exit 1
+fi
+
+# Auto-detect service if not specified
+if [[ -z "$SERVICE" ]]; then
+    if [[ ${#SERVICES[@]} -eq 1 ]]; then
+        SERVICE="${SERVICES[0]}"
+    else
+        echo "Error: Multiple services found. Specify one with x-dive.service or CLI:" >&2
+        printf '  %s\n' "${SERVICES[@]}" >&2
+        exit 1
+    fi
+fi
+
+# Validate service exists
+service_valid=false
+for s in "${SERVICES[@]}"; do
+    [[ "$s" == "$SERVICE" ]] && service_valid=true && break
+done
+if [[ "$service_valid" != true ]]; then
+    echo "Error: Service '$SERVICE' not found. Available services:" >&2
+    printf '  %s\n' "${SERVICES[@]}" >&2
+    exit 1
+fi
+
+# Interpolate init command
+[[ -n "$INIT_CMD" ]] && INIT_CMD=$(interpolate "$INIT_CMD")
+
+# Process mounts (merged from compose + user config)
+OVERRIDE_FILE="/tmp/dive-override-$$.yaml"
+MOUNTS=()
+process_mounts "$CONFIG_FILE" '["x-dive"]'
+[[ -f "$USER_CONFIG" ]] && process_mounts "$USER_CONFIG" ""
+
+# Process env vars (merged from compose + user config)
+declare -A ENV_VARS
+process_env "$CONFIG_FILE" '["x-dive"]'
+[[ -f "$USER_CONFIG" ]] && process_env "$USER_CONFIG" ""
+
+# Build override file with environment and volumes
+if [[ ${#MOUNTS[@]} -gt 0 || ${#ENV_VARS[@]} -gt 0 ]]; then
+    CLEANUP_FILES+=("$OVERRIDE_FILE")
+    cat > "$OVERRIDE_FILE" << EOF
+services:
+  $SERVICE:
+EOF
+    if [[ ${#ENV_VARS[@]} -gt 0 ]]; then
+        echo "    environment:" >> "$OVERRIDE_FILE"
+        for key in "${!ENV_VARS[@]}"; do
+            escaped=$(yaml_escape "${ENV_VARS[$key]}")
+            echo "      $key: \"$escaped\"" >> "$OVERRIDE_FILE"
+        done
+    fi
+    if [[ ${#MOUNTS[@]} -gt 0 ]]; then
+        echo "    volumes:" >> "$OVERRIDE_FILE"
+        for MOUNT in "${MOUNTS[@]}"; do
+            echo "      - $MOUNT" >> "$OVERRIDE_FILE"
+        done
+    fi
+    COMPOSE_CMD="docker compose -p $PROJECT -f $CONFIG_FILE -f $OVERRIDE_FILE"
+else
+    COMPOSE_CMD="docker compose -p $PROJECT -f $CONFIG_FILE"
+fi
+
+if [[ "$NO_BUILD" == false ]]; then
+    docker compose build "$SERVICE"
+fi
+
+$COMPOSE_CMD up -d "$SERVICE"
+
+# Determine shell basename for init handling
+SHELL_BASE=$(basename "$SHELL_NAME")
+
+# Command execution mode
+if [[ ${#CMD[@]} -gt 0 ]]; then
+    if [[ -n "$INIT_CMD" ]]; then
+        # Use selected shell for init + command
+        case "$SHELL_BASE" in
+            fish)
+                $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME" -c "$INIT_CMD; ${CMD[*]}"
+                ;;
+            *)
+                $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME" -c "set +exu; $INIT_CMD; ${CMD[*]}"
+                ;;
+        esac
+    else
+        $COMPOSE_CMD exec -it "$SERVICE" "${CMD[@]}"
+    fi
+    exit $?
+fi
+
+# Interactive shell mode
+case "$SHELL_BASE" in
+    fish)
+        if [[ -n "$INIT_CMD" ]]; then
+            $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME" -C "$INIT_CMD"
+        else
+            $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME"
+        fi
+        ;;
+    *)
+        # bash, zsh, sh, etc - use rcfile approach for bash-compatible shells
+        if [[ -n "$INIT_CMD" ]]; then
+            $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME" -c "
+                cat > /tmp/.dive-init << 'RCEOF'
+set +exu
+$INIT_CMD
+RCEOF
+                exec $SHELL_NAME --rcfile /tmp/.dive-init 2>/dev/null || exec $SHELL_NAME
+            "
+        else
+            $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME"
+        fi
+        ;;
+esac
