@@ -94,10 +94,11 @@ yaml_escape() {
 process_env() {
     local file="$1"
     local base="$2"  # '["x-dive"]' for compose, '' for user config
-    local keys k v
-    keys=$(yq -r ".$base.env // {} | keys | .[]" "$file" 2>/dev/null) || return 0
+    local keys k v prefix
+    [[ -n "$base" ]] && prefix=".$base" || prefix=""
+    keys=$(yq -r "${prefix}.env // {} | keys | .[]" "$file" 2>/dev/null) || return 0
     for k in $keys; do
-        v=$(yq -r ".$base.env[\"$k\"]" "$file")
+        v=$(yq -r "${prefix}.env[\"$k\"]" "$file")
         v=$(interpolate "$v")
         ENV_VARS["$k"]="$v"
     done
@@ -107,13 +108,14 @@ process_env() {
 process_mounts() {
     local file="$1"
     local base="$2"  # '["x-dive"]' for compose, '' for user config
-    local count
-    count=$(yq ".$base.mounts | length // 0" "$file")
+    local count prefix
+    [[ -n "$base" ]] && prefix=".$base" || prefix=""
+    count=$(yq "${prefix}.mounts | length // 0" "$file")
 
     for ((i = 0; i < count; i++)); do
         local entry entry_type
-        entry=$(yq -r ".$base.mounts[$i]" "$file")
-        entry_type=$(yq -r ".$base.mounts[$i] | type" "$file")
+        entry=$(yq -r "${prefix}.mounts[$i]" "$file")
+        entry_type=$(yq -r "${prefix}.mounts[$i] | type" "$file")
 
         if [[ "$entry_type" == "!!str" ]]; then
             # Interpolate template variables first
@@ -140,10 +142,10 @@ process_mounts() {
             fi
         elif [[ "$entry_type" == "!!map" ]]; then
             local binary source target mode
-            binary=$(yq -r ".$base.mounts[$i].binary // \"\"" "$file")
-            source=$(yq -r ".$base.mounts[$i].source // \"\"" "$file")
-            target=$(yq -r ".$base.mounts[$i].target // \"\"" "$file")
-            mode=$(yq -r ".$base.mounts[$i].mode // \"ro\"" "$file")
+            binary=$(yq -r "${prefix}.mounts[$i].binary // \"\"" "$file")
+            source=$(yq -r "${prefix}.mounts[$i].source // \"\"" "$file")
+            target=$(yq -r "${prefix}.mounts[$i].target // \"\"" "$file")
+            mode=$(yq -r "${prefix}.mounts[$i].mode // \"ro\"" "$file")
 
             # Interpolate template variables
             binary=$(interpolate "$binary")
@@ -308,7 +310,7 @@ if [[ "$NO_BUILD" == false ]]; then
     docker compose build "$SERVICE"
 fi
 
-$COMPOSE_CMD up -d "$SERVICE"
+$COMPOSE_CMD up -d --quiet-pull "$SERVICE" &> /dev/null
 
 # Determine shell basename for init handling
 SHELL_BASE=$(basename "$SHELL_NAME")
