@@ -1,6 +1,8 @@
-# dive
+# dive.sh
 
 A Docker Compose wrapper for interactive container development sessions.
+
+> **Note:** Named `dive.sh` to avoid collision with [wagoodman/dive](https://github.com/wagoodman/dive), a tool for exploring Docker image layers.
 
 ## Requirements
 
@@ -11,7 +13,7 @@ A Docker Compose wrapper for interactive container development sessions.
 ## Usage
 
 ```bash
-dive [options] [service] [-- command...]
+dive.sh [options] [service] [-- command...]
 ```
 
 ### Options
@@ -25,19 +27,19 @@ dive [options] [service] [-- command...]
 
 ```bash
 # Start interactive session (auto-detects service)
-dive
+dive.sh
 
 # Start with specific service
-dive myservice
+dive.sh myservice
 
 # Use fish shell
-dive -s fish
+dive.sh -s fish
 
 # Skip build step
-dive -n
+dive.sh -n
 
 # Run a command instead of interactive shell
-dive -- npm test
+dive.sh -- npm test
 ```
 
 ## Compose Extensions
