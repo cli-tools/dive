@@ -139,6 +139,88 @@ Settings are loaded in this order (later overrides earlier):
 
 Mounts and env vars from all sources are merged. Other settings are overridden.
 
+## Testing
+
+The `test/` directory contains a minimal compose project for validating shell
+init across bash, zsh, and fish. The test uses `script(1)` to simulate a TTY
+(required by `docker compose exec -it`).
+
+### Setup
+
+```bash
+cd test
+docker compose build -q
+```
+
+### test/Dockerfile
+
+```dockerfile
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash zsh fish \
+    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /opt/myapp/bin && printf '%s\n' \
+    'export MYAPP_HOME=/opt/myapp' \
+    'export PATH="$MYAPP_HOME/bin:$PATH"' \
+    > /opt/myapp/env.sh
+CMD ["sleep", "infinity"]
+```
+
+### test/compose.yaml
+
+```yaml
+services:
+  testbox:
+    build: .
+    command: sleep infinity
+
+x-dive:
+  shell: bash
+  init: "source /opt/myapp/env.sh"
+```
+
+### Validate
+
+Run from the `test/` directory. Each test launches an interactive shell via
+`script -qec`, sends commands through stdin, then greps the output for
+expected values after stripping ANSI escape sequences.
+
+```bash
+strip_ansi() {
+  sed 's/\x1b\[[^m]*m//g; s/\x1b\[[^a-zA-Z]*[a-zA-Z]//g; s/\r//g' "$1"
+}
+
+# Command mode — init env available in all shells
+for sh in bash zsh fish; do
+  result=$(dive.sh -n -s "$sh" -- echo "MYAPP=\$MYAPP_HOME")
+  echo "$sh cmd: $result"
+  [[ "$result" == *"MYAPP=/opt/myapp"* ]] || { echo "FAIL: $sh cmd"; exit 1; }
+done
+
+# Interactive mode — prompt and init env present
+script -qec 'dive.sh -n -s bash' /tmp/t-bash.txt <<< $'echo "PS1=[$PS1] MYAPP=[$MYAPP_HOME]"\nexit'
+out=$(strip_ansi /tmp/t-bash.txt)
+echo "$out" | grep -q 'PS1=\[.*\\u@\\h' || { echo "FAIL: bash PS1"; exit 1; }
+echo "$out" | grep -q 'MYAPP=\[/opt/myapp\]' || { echo "FAIL: bash MYAPP"; exit 1; }
+
+script -qec 'dive.sh -n -s zsh' /tmp/t-zsh.txt <<< $'echo "PROMPT=[$PROMPT] MYAPP=[$MYAPP_HOME]"\nexit'
+out=$(strip_ansi /tmp/t-zsh.txt)
+echo "$out" | grep -q 'PROMPT=\[%m%# \]' || { echo "FAIL: zsh PROMPT"; exit 1; }
+echo "$out" | grep -q 'MYAPP=\[/opt/myapp\]' || { echo "FAIL: zsh MYAPP"; exit 1; }
+
+script -qec 'dive.sh -n -s fish' /tmp/t-fish.txt <<< $'echo "MYAPP=[$MYAPP_HOME]"\nexit'
+out=$(strip_ansi /tmp/t-fish.txt)
+echo "$out" | grep -q 'MYAPP=\[/opt/myapp\]' || { echo "FAIL: fish MYAPP"; exit 1; }
+
+echo "ALL PASSED"
+```
+
+### Cleanup
+
+```bash
+docker compose down
+```
+
 ## License
 
 BSD Zero Clause License (0BSD) - See source for details.

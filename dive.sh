@@ -281,30 +281,28 @@ declare -A ENV_VARS
 process_env "$CONFIG_FILE" '["x-dive"]'
 [[ -f "$USER_CONFIG" ]] && process_env "$USER_CONFIG" ""
 
-# Build override file with environment and volumes
-if [[ ${#MOUNTS[@]} -gt 0 || ${#ENV_VARS[@]} -gt 0 ]]; then
-    CLEANUP_FILES+=("$OVERRIDE_FILE")
-    cat > "$OVERRIDE_FILE" << EOF
+# Build override file: neutralize entrypoint + add environment/volumes
+CLEANUP_FILES+=("$OVERRIDE_FILE")
+cat > "$OVERRIDE_FILE" << EOF
 services:
   $SERVICE:
+    entrypoint: ["sleep", "infinity"]
+    command: []
 EOF
-    if [[ ${#ENV_VARS[@]} -gt 0 ]]; then
-        echo "    environment:" >> "$OVERRIDE_FILE"
-        for key in "${!ENV_VARS[@]}"; do
-            escaped=$(yaml_escape "${ENV_VARS[$key]}")
-            echo "      $key: \"$escaped\"" >> "$OVERRIDE_FILE"
-        done
-    fi
-    if [[ ${#MOUNTS[@]} -gt 0 ]]; then
-        echo "    volumes:" >> "$OVERRIDE_FILE"
-        for MOUNT in "${MOUNTS[@]}"; do
-            echo "      - $MOUNT" >> "$OVERRIDE_FILE"
-        done
-    fi
-    COMPOSE_CMD="docker compose -p $PROJECT -f $CONFIG_FILE -f $OVERRIDE_FILE"
-else
-    COMPOSE_CMD="docker compose -p $PROJECT -f $CONFIG_FILE"
+if [[ ${#ENV_VARS[@]} -gt 0 ]]; then
+    echo "    environment:" >> "$OVERRIDE_FILE"
+    for key in "${!ENV_VARS[@]}"; do
+        escaped=$(yaml_escape "${ENV_VARS[$key]}")
+        echo "      $key: \"$escaped\"" >> "$OVERRIDE_FILE"
+    done
 fi
+if [[ ${#MOUNTS[@]} -gt 0 ]]; then
+    echo "    volumes:" >> "$OVERRIDE_FILE"
+    for MOUNT in "${MOUNTS[@]}"; do
+        echo "      - $MOUNT" >> "$OVERRIDE_FILE"
+    done
+fi
+COMPOSE_CMD="docker compose -p $PROJECT -f $CONFIG_FILE -f $OVERRIDE_FILE"
 
 if [[ "$NO_BUILD" == false ]]; then
     echo "Building $SERVICE... (skip with -n)"
@@ -313,48 +311,19 @@ fi
 
 $COMPOSE_CMD up -d --quiet-pull "$SERVICE" &> /dev/null
 
-# Determine shell basename for init handling
-SHELL_BASE=$(basename "$SHELL_NAME")
-
 # Command execution mode
 if [[ ${#CMD[@]} -gt 0 ]]; then
     if [[ -n "$INIT_CMD" ]]; then
-        # Use selected shell for init + command
-        case "$SHELL_BASE" in
-            fish)
-                $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME" -c "$INIT_CMD; ${CMD[*]}"
-                ;;
-            *)
-                $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME" -c "set +exu; $INIT_CMD; ${CMD[*]}"
-                ;;
-        esac
+        $COMPOSE_CMD exec -it "$SERVICE" bash -c "set +eu; $INIT_CMD; ${CMD[*]}"
     else
         $COMPOSE_CMD exec -it "$SERVICE" "${CMD[@]}"
     fi
     exit $?
 fi
 
-# Interactive shell mode
-case "$SHELL_BASE" in
-    fish)
-        if [[ -n "$INIT_CMD" ]]; then
-            $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME" -C "$INIT_CMD"
-        else
-            $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME"
-        fi
-        ;;
-    *)
-        # bash, zsh, sh, etc - use rcfile approach for bash-compatible shells
-        if [[ -n "$INIT_CMD" ]]; then
-            $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME" -c "
-                cat > /tmp/.dive-init << 'RCEOF'
-set +exu
-$INIT_CMD
-RCEOF
-                exec $SHELL_NAME --rcfile /tmp/.dive-init 2>/dev/null || exec $SHELL_NAME
-            "
-        else
-            $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME"
-        fi
-        ;;
-esac
+# Interactive shell mode: init in bash, then exec into requested shell
+if [[ -n "$INIT_CMD" ]]; then
+    $COMPOSE_CMD exec -it "$SERVICE" bash -c "set +eu; $INIT_CMD; exec $SHELL_NAME"
+else
+    $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME"
+fi
