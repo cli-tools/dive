@@ -174,6 +174,7 @@ process_mounts() {
 ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -h|--help) usage ;;
         -C) cd "$2" || exit 1; shift 2 ;;
         --) ARGS+=("$@"); break ;;
         *)  ARGS+=("$1"); shift ;;
@@ -219,7 +220,6 @@ CMD=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -h|--help) usage ;;
         -n|--no-build) CLI_NO_BUILD=true; shift ;;
         -s|--shell) CLI_SHELL="$2"; shift 2 ;;
         --) shift; CMD=("$@"); break ;;
