@@ -22,6 +22,7 @@ Usage: dive [options] [service] [-- command...]
 A Docker Compose wrapper for interactive container development sessions.
 
 Options:
+  -C PATH           Change to directory before doing anything
   -n, --no-build    Skip building the container
   -s, --shell PATH  Use specified shell (default: bash)
   -h, --help        Show this help message
@@ -168,6 +169,17 @@ process_mounts() {
         fi
     done
 }
+
+# Early scan for -C (must happen before compose file discovery)
+ARGS=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -C) cd "$2" || exit 1; shift 2 ;;
+        --) ARGS+=("$@"); break ;;
+        *)  ARGS+=("$1"); shift ;;
+    esac
+done
+set -- "${ARGS[@]}"
 
 # Check dependencies
 missing=()

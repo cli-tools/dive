@@ -18,6 +18,7 @@ dive.sh [options] [service] [-- command...]
 
 ### Options
 
+- `-C <path>` - Change to directory before doing anything
 - `-n, --no-build` - Skip building the container
 - `-s, --shell <path>` - Use specified shell (default: bash)
 - `-h, --help` - Show help message
