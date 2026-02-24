@@ -23,6 +23,7 @@ A Docker Compose wrapper for interactive container development sessions.
 
 Options:
   -C PATH           Change to directory before doing anything
+  -d, --detach      Start container in background without attaching
   -n, --no-build    Skip building the container
   -s, --shell PATH  Use specified shell (default: bash)
   -h, --help        Show this help message
@@ -176,6 +177,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help) usage ;;
         -C) cd "$2" || exit 1; shift 2 ;;
+        -d|--detach) ARGS+=("$1"); shift ;;
         --) ARGS+=("$@"); break ;;
         *)  ARGS+=("$1"); shift ;;
     esac
@@ -214,12 +216,14 @@ docker compose config > "$CONFIG_FILE" 2>/dev/null || {
 
 # Parse CLI arguments (highest priority)
 CLI_NO_BUILD=false
+CLI_DETACH=false
 CLI_SERVICE=""
 CLI_SHELL=""
 CMD=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -d|--detach) CLI_DETACH=true; shift ;;
         -n|--no-build) CLI_NO_BUILD=true; shift ;;
         -s|--shell) CLI_SHELL="$2"; shift 2 ;;
         --) shift; CMD=("$@"); break ;;
@@ -322,6 +326,8 @@ if [[ "$NO_BUILD" == false ]]; then
 fi
 
 $COMPOSE_CMD up -d --quiet-pull "$SERVICE" &> /dev/null
+
+[[ "$CLI_DETACH" == true ]] && exit 0
 
 # Command execution mode
 if [[ ${#CMD[@]} -gt 0 ]]; then
