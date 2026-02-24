@@ -118,7 +118,7 @@ process_mounts() {
         entry=$(yq -r "${prefix}.mounts[$i]" "$file")
         entry_type=$(yq -r "${prefix}.mounts[$i] | type" "$file")
 
-        if [[ "$entry_type" == "!!str" ]]; then
+        if [[ "$entry_type" == "!!str" || "$entry_type" == "string" ]]; then
             # Interpolate template variables first
             entry=$(interpolate "$entry")
 
@@ -141,7 +141,7 @@ process_mounts() {
                     MOUNTS+=("$source:$target:$mode")
                 fi
             fi
-        elif [[ "$entry_type" == "!!map" ]]; then
+        elif [[ "$entry_type" == "!!map" || "$entry_type" == "object" ]]; then
             local binary source target mode
             binary=$(yq -r "${prefix}.mounts[$i].binary // \"\"" "$file")
             source=$(yq -r "${prefix}.mounts[$i].source // \"\"" "$file")
