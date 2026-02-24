@@ -201,7 +201,7 @@ CLEANUP_FILES+=("$CONFIG_FILE")
 # (needed because services with profiles are excluded from config output)
 for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
     if [[ -f "$f" ]]; then
-        DIVE_PROFILE=$(yq '.["x-dive"].profile // ""' "$f" 2>/dev/null)
+        DIVE_PROFILE=$(yq -r '.["x-dive"].profile // ""' "$f" 2>/dev/null)
         [[ -n "$DIVE_PROFILE" ]] && export COMPOSE_PROFILES="$DIVE_PROFILE"
         break
     fi
@@ -228,17 +228,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Layer 1: Read from compose file (lowest priority)
-SERVICE=$(yq '.["x-dive"].service // ""' "$CONFIG_FILE")
-SHELL_NAME=$(yq '.["x-dive"].shell // "bash"' "$CONFIG_FILE")
-INIT_CMD=$(yq '.["x-dive"].init // ""' "$CONFIG_FILE")
-PROJECT=$(yq '.name // ""' "$CONFIG_FILE")
+SERVICE=$(yq -r '.["x-dive"].service // ""' "$CONFIG_FILE")
+SHELL_NAME=$(yq -r '.["x-dive"].shell // "bash"' "$CONFIG_FILE")
+INIT_CMD=$(yq -r '.["x-dive"].init // ""' "$CONFIG_FILE")
+PROJECT=$(yq -r '.name // ""' "$CONFIG_FILE")
 [[ -z "$PROJECT" ]] && PROJECT=$(basename "$PWD")
 
 # Layer 2: Override with user config if exists (uses short keys)
 if [[ -f "$USER_CONFIG" ]]; then
-    user_service=$(yq '.service // ""' "$USER_CONFIG")
-    user_shell=$(yq '.shell // ""' "$USER_CONFIG")
-    user_init=$(yq '.init // ""' "$USER_CONFIG")
+    user_service=$(yq -r '.service // ""' "$USER_CONFIG")
+    user_shell=$(yq -r '.shell // ""' "$USER_CONFIG")
+    user_init=$(yq -r '.init // ""' "$USER_CONFIG")
     [[ -n "$user_service" ]] && SERVICE="$user_service"
     [[ -n "$user_shell" ]] && SHELL_NAME="$user_shell"
     [[ -n "$user_init" ]] && INIT_CMD="$user_init"
