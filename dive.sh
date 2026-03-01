@@ -21,6 +21,10 @@ Usage: dive [options] [service] [-- command...]
 
 A Docker Compose wrapper for interactive container development sessions.
 
+Works with any compose file (compose.yaml, docker-compose.yml, etc.) or a
+standalone Dockerfile. When no compose file is found, dive looks for a
+Dockerfile and generates a minimal compose configuration automatically.
+
 Options:
   -C PATH           Change to directory before doing anything
   -d, --detach      Start container in background without attaching
@@ -35,6 +39,14 @@ Configuration (x-dive extension in compose file):
     init            Commands to run on container entry
     mounts          Host files/binaries to mount
     env             Environment variables
+    target          Build target stage
+    shm_size        Shared memory size (e.g. 2gb)
+    network_mode    Network mode (e.g. host)
+    ipc             IPC mode (e.g. host)
+
+Project config (.dive.yaml in project directory):
+  Same keys as above (without x-dive: wrapper). Overrides compose settings
+  but is overridden by user config and CLI arguments.
 
 Template variables (Go-like text/template syntax):
   {{.Service}}      Service name
@@ -42,13 +54,14 @@ Template variables (Go-like text/template syntax):
   {{.Shell}}        Selected shell
 
 Templates are interpolated in env values, mount paths, and init commands.
-Config is read from compose file, then ~/.config/dive/config.yaml, then CLI.
+Config is read from compose x-dive, then .dive.yaml, then user config, then CLI.
 Later sources override earlier ones; mounts and env vars are merged.
 EOF
     exit 0
 }
 
 USER_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/dive/config.yaml"
+PROJECT_CONFIG=".dive.yaml"
 CLEANUP_FILES=()
 
 cleanup() {
@@ -171,6 +184,21 @@ process_mounts() {
     done
 }
 
+# Process compose service properties from a yaml file
+process_service_props() {
+    local file="$1"
+    local base="$2"  # '["x-dive"]' for compose, '' for project/user config
+    local prefix
+    [[ -n "$base" ]] && prefix=".$base" || prefix=""
+    for key in target shm_size network_mode ipc; do
+        local val
+        val=$(yq -r "${prefix}.${key} // \"\"" "$file" 2>/dev/null) || continue
+        if [[ -n "$val" ]]; then
+            SERVICE_PROPS[$key]="$val"
+        fi
+    done
+}
+
 # Early scan for -C (must happen before compose file discovery)
 ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -201,18 +229,54 @@ CLEANUP_FILES+=("$CONFIG_FILE")
 
 # Read x-dive.profile directly from compose file before running config
 # (needed because services with profiles are excluded from config output)
+COMPOSE_FOUND=false
+DIVE_PROFILE=""
 for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
     if [[ -f "$f" ]]; then
-        DIVE_PROFILE=$(yq -r '.["x-dive"].profile // ""' "$f" 2>/dev/null)
-        [[ -n "$DIVE_PROFILE" ]] && export COMPOSE_PROFILES="$DIVE_PROFILE"
+        COMPOSE_FOUND=true
+        DIVE_PROFILE=$(yq -r '.["x-dive"].profile // ""' "$f" 2>/dev/null) || true
         break
     fi
 done
+# Project config and user config can also set profile (higher priority)
+if [[ -f "$PROJECT_CONFIG" ]]; then
+    proj_profile=$(yq -r '.profile // ""' "$PROJECT_CONFIG" 2>/dev/null) || true
+    [[ -n "$proj_profile" ]] && DIVE_PROFILE="$proj_profile"
+fi
+if [[ -f "$USER_CONFIG" ]]; then
+    user_profile=$(yq -r '.profile // ""' "$USER_CONFIG" 2>/dev/null) || true
+    [[ -n "$user_profile" ]] && DIVE_PROFILE="$user_profile"
+fi
+[[ -n "$DIVE_PROFILE" ]] && export COMPOSE_PROFILES="$DIVE_PROFILE"
 
-docker compose config > "$CONFIG_FILE" 2>/dev/null || {
-    echo "Error: No compose file found or invalid configuration" >&2
+if [[ "$COMPOSE_FOUND" == true ]] || docker compose config > "$CONFIG_FILE" 2>/dev/null; then
+    # Compose file found (locally or via COMPOSE_FILE env var)
+    if [[ "$COMPOSE_FOUND" == true ]]; then
+        docker compose config > "$CONFIG_FILE" 2>/dev/null || {
+            echo "Error: Invalid compose configuration" >&2
+            exit 1
+        }
+    fi
+elif [[ -f Dockerfile ]]; then
+    # Fallback: generate a minimal compose file from Dockerfile
+    GENERATED_COMPOSE="/tmp/dive-compose-$$.yaml"
+    CLEANUP_FILES+=("$GENERATED_COMPOSE")
+    cat > "$GENERATED_COMPOSE" << EOF
+name: "$(basename "$PWD")"
+services:
+  app:
+    build:
+      context: "$PWD"
+      dockerfile: Dockerfile
+EOF
+    docker compose -f "$GENERATED_COMPOSE" config > "$CONFIG_FILE" 2>/dev/null || {
+        echo "Error: Failed to process generated compose file from Dockerfile" >&2
+        exit 1
+    }
+else
+    echo "Error: No compose file or Dockerfile found" >&2
     exit 1
-}
+fi
 
 # Parse CLI arguments (highest priority)
 CLI_NO_BUILD=false
@@ -238,7 +302,17 @@ INIT_CMD=$(yq -r '.["x-dive"].init // ""' "$CONFIG_FILE")
 PROJECT=$(yq -r '.name // ""' "$CONFIG_FILE")
 [[ -z "$PROJECT" ]] && PROJECT=$(basename "$PWD")
 
-# Layer 2: Override with user config if exists (uses short keys)
+# Layer 2: Override with project config if exists
+if [[ -f "$PROJECT_CONFIG" ]]; then
+    proj_service=$(yq -r '.service // ""' "$PROJECT_CONFIG")
+    proj_shell=$(yq -r '.shell // ""' "$PROJECT_CONFIG")
+    proj_init=$(yq -r '.init // ""' "$PROJECT_CONFIG")
+    [[ -n "$proj_service" ]] && SERVICE="$proj_service"
+    [[ -n "$proj_shell" ]] && SHELL_NAME="$proj_shell"
+    [[ -n "$proj_init" ]] && INIT_CMD="$proj_init"
+fi
+
+# Layer 3: Override with user config if exists (uses short keys)
 if [[ -f "$USER_CONFIG" ]]; then
     user_service=$(yq -r '.service // ""' "$USER_CONFIG")
     user_shell=$(yq -r '.shell // ""' "$USER_CONFIG")
@@ -248,7 +322,7 @@ if [[ -f "$USER_CONFIG" ]]; then
     [[ -n "$user_init" ]] && INIT_CMD="$user_init"
 fi
 
-# Layer 3: Override with CLI arguments (highest priority)
+# Layer 4: Override with CLI arguments (highest priority)
 [[ -n "$CLI_SERVICE" ]] && SERVICE="$CLI_SERVICE"
 [[ -n "$CLI_SHELL" ]] && SHELL_NAME="$CLI_SHELL"
 NO_BUILD="$CLI_NO_BUILD"
@@ -290,12 +364,20 @@ fi
 OVERRIDE_FILE="/tmp/dive-override-$$.yaml"
 MOUNTS=()
 process_mounts "$CONFIG_FILE" '["x-dive"]'
+[[ -f "$PROJECT_CONFIG" ]] && process_mounts "$PROJECT_CONFIG" ""
 [[ -f "$USER_CONFIG" ]] && process_mounts "$USER_CONFIG" ""
 
-# Process env vars (merged from compose + user config)
+# Process env vars (merged from compose + project config + user config)
 declare -A ENV_VARS
 process_env "$CONFIG_FILE" '["x-dive"]'
+[[ -f "$PROJECT_CONFIG" ]] && process_env "$PROJECT_CONFIG" ""
 [[ -f "$USER_CONFIG" ]] && process_env "$USER_CONFIG" ""
+
+# Process compose service properties (merged from all layers)
+declare -A SERVICE_PROPS
+process_service_props "$CONFIG_FILE" '["x-dive"]'
+[[ -f "$PROJECT_CONFIG" ]] && process_service_props "$PROJECT_CONFIG" ""
+[[ -f "$USER_CONFIG" ]] && process_service_props "$USER_CONFIG" ""
 
 # Build override file: neutralize entrypoint + add environment/volumes
 CLEANUP_FILES+=("$OVERRIDE_FILE")
@@ -318,14 +400,38 @@ if [[ ${#MOUNTS[@]} -gt 0 ]]; then
         echo "      - $MOUNT" >> "$OVERRIDE_FILE"
     done
 fi
+# Inject compose service properties
+for key in shm_size network_mode ipc; do
+    if [[ -n "${SERVICE_PROPS[$key]+x}" ]]; then
+        escaped=$(yaml_escape "${SERVICE_PROPS[$key]}")
+        echo "    $key: \"$escaped\"" >> "$OVERRIDE_FILE"
+    fi
+done
+# network_mode and networks are mutually exclusive in compose
+if [[ -n "${SERVICE_PROPS[network_mode]+x}" ]]; then
+    echo "    networks: !reset []" >> "$OVERRIDE_FILE"
+fi
+if [[ -n "${SERVICE_PROPS[target]+x}" ]]; then
+    escaped=$(yaml_escape "${SERVICE_PROPS[target]}")
+    echo "    build:" >> "$OVERRIDE_FILE"
+    echo "      target: \"$escaped\"" >> "$OVERRIDE_FILE"
+fi
 COMPOSE_CMD="docker compose -p $PROJECT -f $CONFIG_FILE -f $OVERRIDE_FILE"
 
 if [[ "$NO_BUILD" == false ]]; then
-    echo "Building $SERVICE... (skip with -n)"
-    docker compose build -q "$SERVICE"
+    echo "Building $SERVICE... (skip with -n)" >&2
+    if ! build_err=$($COMPOSE_CMD build -q "$SERVICE" 2>&1); then
+        echo "Error: Failed to build service '$SERVICE'" >&2
+        [[ -n "$build_err" ]] && echo "$build_err" >&2
+        exit 1
+    fi
 fi
 
-$COMPOSE_CMD up -d --quiet-pull "$SERVICE" &> /dev/null
+if ! up_err=$($COMPOSE_CMD up -d --quiet-pull "$SERVICE" 2>&1); then
+    echo "Error: Failed to start service '$SERVICE'" >&2
+    [[ -n "$up_err" ]] && echo "$up_err" >&2
+    exit 1
+fi
 
 [[ "$CLI_DETACH" == true ]] && exit 0
 

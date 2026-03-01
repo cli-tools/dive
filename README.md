@@ -43,6 +43,17 @@ dive.sh -n
 dive.sh -- npm test
 ```
 
+## Standalone Dockerfile
+
+If no compose file is present but a `Dockerfile` exists in the working directory, dive automatically generates a minimal compose configuration and proceeds normally. The service is named `app` and the project name is derived from the directory name.
+
+```bash
+# In a directory with just a Dockerfile
+dive.sh
+```
+
+All features work in this mode — shell selection, init commands, mounts, and env vars — configured via `.dive.yaml`, `~/.config/dive/config.yaml`, and CLI arguments.
+
 ## Compose Extensions
 
 Dive uses the `x-dive` extension in your compose file. Works with `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, or any file specified via `COMPOSE_FILE`.
@@ -69,6 +80,10 @@ x-dive:
 | `init` | Commands to run on container entry |
 | `env` | Environment variables |
 | `mounts` | Host files/binaries to mount |
+| `target` | Build target stage (maps to `build.target`) |
+| `shm_size` | Shared memory size (e.g. `2gb`) |
+| `network_mode` | Network mode (e.g. `host`) |
+| `ipc` | IPC mode (e.g. `host`) |
 
 ### Template Variables
 
@@ -112,6 +127,27 @@ Mount types:
 
 Mounts are silently skipped if the source doesn't exist.
 
+## Project Configuration
+
+Create `.dive.yaml` in the project directory for project-specific settings. This is especially useful for Dockerfile-only projects where there is no compose file to put `x-dive:` in.
+
+Uses the same keys as `x-dive:` (without the wrapper):
+
+```yaml
+shell: fish
+init: source /app/.venv/bin/activate
+target: dev
+shm_size: 2gb
+network_mode: host
+ipc: host
+env:
+  EDITOR: nvim
+mounts:
+  - neovim
+```
+
+Project config overrides compose `x-dive:` settings but is overridden by user config and CLI arguments.
+
 ## User Configuration
 
 Create `~/.config/dive/config.yaml` for personal defaults that apply to all projects.
@@ -135,8 +171,9 @@ mounts:
 Settings are loaded in this order (later overrides earlier):
 
 1. **Compose file** - Project defaults (`x-dive:` extension)
-2. **~/.config/dive/config.yaml** - User preferences (respects `$XDG_CONFIG_HOME`)
-3. **CLI arguments** - Immediate overrides
+2. **.dive.yaml** - Project config (same directory)
+3. **~/.config/dive/config.yaml** - User preferences (respects `$XDG_CONFIG_HOME`)
+4. **CLI arguments** - Immediate overrides
 
 Mounts and env vars from all sources are merged. Other settings are overridden.
 
