@@ -19,6 +19,7 @@ dive.sh [options] [service] [-- command...]
 ### Options
 
 - `-C <path>` - Change to directory before doing anything
+- `-k, --keep-entrypoint` - Keep original entrypoint (don't replace with sleep)
 - `-n, --no-build` - Skip building the container
 - `-s, --shell <path>` - Use specified shell (default: bash)
 - `-h, --help` - Show help message
@@ -80,6 +81,8 @@ x-dive:
 | `init` | Commands to run on container entry |
 | `env` | Environment variables |
 | `mounts` | Host files/binaries to mount |
+| `command` | Container command (implies `keep_entrypoint`) |
+| `keep_entrypoint` | Keep original entrypoint/command (default: false) |
 | `target` | Build target stage (maps to `build.target`) |
 | `shm_size` | Shared memory size (e.g. `2gb`) |
 | `network_mode` | Network mode (e.g. `host`) |

@@ -28,6 +28,7 @@ Dockerfile and generates a minimal compose configuration automatically.
 Options:
   -C PATH           Change to directory before doing anything
   -d, --detach      Start container in background without attaching
+  -k, --keep-entrypoint  Keep original entrypoint (don't replace with sleep)
   -n, --no-build    Skip building the container
   -s, --shell PATH  Use specified shell (default: bash)
   -h, --help        Show this help message
@@ -41,6 +42,8 @@ Configuration (x-dive extension in compose file):
     env             Environment variables
     target          Build target stage
     shm_size        Shared memory size (e.g. 2gb)
+    command          Container command (implies keep_entrypoint)
+    keep_entrypoint  Keep original entrypoint/command (default: false)
     network_mode    Network mode (e.g. host)
     ipc             IPC mode (e.g. host)
 
@@ -206,6 +209,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help) usage ;;
         -C) cd "$2" || exit 1; shift 2 ;;
         -d|--detach) ARGS+=("$1"); shift ;;
+        -k|--keep-entrypoint) ARGS+=("$1"); shift ;;
         --) ARGS+=("$@"); break ;;
         *)  ARGS+=("$1"); shift ;;
     esac
@@ -281,6 +285,7 @@ fi
 # Parse CLI arguments (highest priority)
 CLI_NO_BUILD=false
 CLI_DETACH=false
+CLI_KEEP_ENTRYPOINT=false
 CLI_SERVICE=""
 CLI_SHELL=""
 CMD=()
@@ -288,6 +293,7 @@ CMD=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         -d|--detach) CLI_DETACH=true; shift ;;
+        -k|--keep-entrypoint) CLI_KEEP_ENTRYPOINT=true; shift ;;
         -n|--no-build) CLI_NO_BUILD=true; shift ;;
         -s|--shell) CLI_SHELL="$2"; shift 2 ;;
         --) shift; CMD=("$@"); break ;;
@@ -299,6 +305,8 @@ done
 SERVICE=$(yq -r '.["x-dive"].service // ""' "$CONFIG_FILE")
 SHELL_NAME=$(yq -r '.["x-dive"].shell // "bash"' "$CONFIG_FILE")
 INIT_CMD=$(yq -r '.["x-dive"].init // ""' "$CONFIG_FILE")
+KEEP_ENTRYPOINT=$(yq -r '.["x-dive"].keep_entrypoint // "false"' "$CONFIG_FILE")
+DIVE_COMMAND=$(yq -r '.["x-dive"].command // ""' "$CONFIG_FILE")
 PROJECT=$(yq -r '.name // ""' "$CONFIG_FILE")
 [[ -z "$PROJECT" ]] && PROJECT=$(basename "$PWD")
 
@@ -307,9 +315,13 @@ if [[ -f "$PROJECT_CONFIG" ]]; then
     proj_service=$(yq -r '.service // ""' "$PROJECT_CONFIG")
     proj_shell=$(yq -r '.shell // ""' "$PROJECT_CONFIG")
     proj_init=$(yq -r '.init // ""' "$PROJECT_CONFIG")
+    proj_keep_ep=$(yq -r '.keep_entrypoint // ""' "$PROJECT_CONFIG")
+    proj_command=$(yq -r '.command // ""' "$PROJECT_CONFIG")
     [[ -n "$proj_service" ]] && SERVICE="$proj_service"
     [[ -n "$proj_shell" ]] && SHELL_NAME="$proj_shell"
     [[ -n "$proj_init" ]] && INIT_CMD="$proj_init"
+    [[ -n "$proj_keep_ep" ]] && KEEP_ENTRYPOINT="$proj_keep_ep"
+    [[ -n "$proj_command" ]] && DIVE_COMMAND="$proj_command"
 fi
 
 # Layer 3: Override with user config if exists (uses short keys)
@@ -317,14 +329,20 @@ if [[ -f "$USER_CONFIG" ]]; then
     user_service=$(yq -r '.service // ""' "$USER_CONFIG")
     user_shell=$(yq -r '.shell // ""' "$USER_CONFIG")
     user_init=$(yq -r '.init // ""' "$USER_CONFIG")
+    user_keep_ep=$(yq -r '.keep_entrypoint // ""' "$USER_CONFIG")
+    user_command=$(yq -r '.command // ""' "$USER_CONFIG")
     [[ -n "$user_service" ]] && SERVICE="$user_service"
     [[ -n "$user_shell" ]] && SHELL_NAME="$user_shell"
     [[ -n "$user_init" ]] && INIT_CMD="$user_init"
+    [[ -n "$user_keep_ep" ]] && KEEP_ENTRYPOINT="$user_keep_ep"
+    [[ -n "$user_command" ]] && DIVE_COMMAND="$user_command"
 fi
 
 # Layer 4: Override with CLI arguments (highest priority)
 [[ -n "$CLI_SERVICE" ]] && SERVICE="$CLI_SERVICE"
 [[ -n "$CLI_SHELL" ]] && SHELL_NAME="$CLI_SHELL"
+[[ "$CLI_KEEP_ENTRYPOINT" == true ]] && KEEP_ENTRYPOINT="true"
+[[ -n "$DIVE_COMMAND" ]] && KEEP_ENTRYPOINT="true"
 NO_BUILD="$CLI_NO_BUILD"
 
 # Get available services
@@ -384,9 +402,15 @@ CLEANUP_FILES+=("$OVERRIDE_FILE")
 cat > "$OVERRIDE_FILE" << EOF
 services:
   $SERVICE:
+EOF
+if [[ "$KEEP_ENTRYPOINT" != "true" ]]; then
+    cat >> "$OVERRIDE_FILE" << EOF
     entrypoint: ["sleep", "infinity"]
     command: []
 EOF
+elif [[ -n "$DIVE_COMMAND" ]]; then
+    echo "    command: $DIVE_COMMAND" >> "$OVERRIDE_FILE"
+fi
 if [[ ${#ENV_VARS[@]} -gt 0 ]]; then
     echo "    environment:" >> "$OVERRIDE_FILE"
     for key in "${!ENV_VARS[@]}"; do
