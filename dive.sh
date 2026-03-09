@@ -31,6 +31,7 @@ Options:
   -k, --keep-entrypoint  Keep original entrypoint (don't replace with sleep)
   -n, --no-build    Skip building the container
   -s, --shell PATH  Use specified shell (default: bash)
+  -w, --working-dir PATH  Set working directory in container
   -h, --help        Show this help message
 
 Configuration (x-dive extension in compose file):
@@ -44,6 +45,7 @@ Configuration (x-dive extension in compose file):
     shm_size        Shared memory size (e.g. 2gb)
     command          Container command (implies keep_entrypoint)
     keep_entrypoint  Keep original entrypoint/command (default: false)
+    working_dir     Working directory in container (e.g. /app)
     network_mode    Network mode (e.g. host)
     ipc             IPC mode (e.g. host)
 
@@ -193,7 +195,7 @@ process_service_props() {
     local base="$2"  # '["x-dive"]' for compose, '' for project/user config
     local prefix
     [[ -n "$base" ]] && prefix=".$base" || prefix=""
-    for key in target shm_size network_mode ipc; do
+    for key in target shm_size working_dir network_mode ipc; do
         local val
         val=$(yq -r "${prefix}.${key} // \"\"" "$file" 2>/dev/null) || continue
         if [[ -n "$val" ]]; then
@@ -288,6 +290,7 @@ CLI_DETACH=false
 CLI_KEEP_ENTRYPOINT=false
 CLI_SERVICE=""
 CLI_SHELL=""
+CLI_WORKING_DIR=""
 CMD=()
 
 while [[ $# -gt 0 ]]; do
@@ -296,6 +299,7 @@ while [[ $# -gt 0 ]]; do
         -k|--keep-entrypoint) CLI_KEEP_ENTRYPOINT=true; shift ;;
         -n|--no-build) CLI_NO_BUILD=true; shift ;;
         -s|--shell) CLI_SHELL="$2"; shift 2 ;;
+        -w|--working-dir) CLI_WORKING_DIR="$2"; shift 2 ;;
         --) shift; CMD=("$@"); break ;;
         *) CLI_SERVICE="$1"; shift ;;
     esac
@@ -396,6 +400,8 @@ declare -A SERVICE_PROPS
 process_service_props "$CONFIG_FILE" '["x-dive"]'
 [[ -f "$PROJECT_CONFIG" ]] && process_service_props "$PROJECT_CONFIG" ""
 [[ -f "$USER_CONFIG" ]] && process_service_props "$USER_CONFIG" ""
+# Layer 4: CLI override for service props
+[[ -n "$CLI_WORKING_DIR" ]] && SERVICE_PROPS[working_dir]="$CLI_WORKING_DIR"
 
 # Build override file: neutralize entrypoint + add environment/volumes
 CLEANUP_FILES+=("$OVERRIDE_FILE")
@@ -425,7 +431,7 @@ if [[ ${#MOUNTS[@]} -gt 0 ]]; then
     done
 fi
 # Inject compose service properties
-for key in shm_size network_mode ipc; do
+for key in shm_size working_dir network_mode ipc; do
     if [[ -n "${SERVICE_PROPS[$key]+x}" ]]; then
         escaped=$(yaml_escape "${SERVICE_PROPS[$key]}")
         echo "    $key: \"$escaped\"" >> "$OVERRIDE_FILE"
@@ -459,19 +465,24 @@ fi
 
 [[ "$CLI_DETACH" == true ]] && exit 0
 
+EXEC_WORKDIR=()
+if [[ -n "${SERVICE_PROPS[working_dir]+x}" ]]; then
+    EXEC_WORKDIR=(-w "${SERVICE_PROPS[working_dir]}")
+fi
+
 # Command execution mode
 if [[ ${#CMD[@]} -gt 0 ]]; then
     if [[ -n "$INIT_CMD" ]]; then
-        $COMPOSE_CMD exec -it "$SERVICE" bash -c "set +eu; $INIT_CMD; ${CMD[*]}"
+        $COMPOSE_CMD exec -it "${EXEC_WORKDIR[@]}" "$SERVICE" bash -c "set +eu; $INIT_CMD; ${CMD[*]}"
     else
-        $COMPOSE_CMD exec -it "$SERVICE" "${CMD[@]}"
+        $COMPOSE_CMD exec -it "${EXEC_WORKDIR[@]}" "$SERVICE" "${CMD[@]}"
     fi
     exit $?
 fi
 
 # Interactive shell mode: init in bash, then exec into requested shell
 if [[ -n "$INIT_CMD" ]]; then
-    $COMPOSE_CMD exec -it "$SERVICE" bash -c "set +eu; $INIT_CMD; exec $SHELL_NAME"
+    $COMPOSE_CMD exec -it "${EXEC_WORKDIR[@]}" "$SERVICE" bash -c "set +eu; $INIT_CMD; exec $SHELL_NAME"
 else
-    $COMPOSE_CMD exec -it "$SERVICE" "$SHELL_NAME"
+    $COMPOSE_CMD exec -it "${EXEC_WORKDIR[@]}" "$SERVICE" "$SHELL_NAME"
 fi
