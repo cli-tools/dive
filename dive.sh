@@ -46,6 +46,7 @@ Configuration (x-dive extension in compose file):
     command          Container command (implies keep_entrypoint)
     keep_entrypoint  Keep original entrypoint/command (default: false)
     working_dir     Working directory in container (e.g. /app)
+    match_user      Run as host UID:GID inside container (default: true)
     network_mode    Network mode (e.g. host)
     ipc             IPC mode (e.g. host)
 
@@ -199,6 +200,8 @@ process_service_props() {
         local val
         val=$(yq -r "${prefix}.${key} // \"\"" "$file" 2>/dev/null) || continue
         if [[ -n "$val" ]]; then
+            val=$(expand_vars "$val")
+            val=$(interpolate "$val")
             SERVICE_PROPS[$key]="$val"
         fi
     done
@@ -310,6 +313,7 @@ SERVICE=$(yq -r '.["x-dive"].service // ""' "$CONFIG_FILE")
 SHELL_NAME=$(yq -r '.["x-dive"].shell // "bash"' "$CONFIG_FILE")
 INIT_CMD=$(yq -r '.["x-dive"].init // ""' "$CONFIG_FILE")
 KEEP_ENTRYPOINT=$(yq -r '.["x-dive"].keep_entrypoint // "false"' "$CONFIG_FILE")
+MATCH_USER=$(yq -r '.["x-dive"].match_user // "true"' "$CONFIG_FILE")
 DIVE_COMMAND=$(yq -r '.["x-dive"].command // ""' "$CONFIG_FILE")
 PROJECT=$(yq -r '.name // ""' "$CONFIG_FILE")
 [[ -z "$PROJECT" ]] && PROJECT=$(basename "$PWD")
@@ -320,11 +324,13 @@ if [[ -f "$PROJECT_CONFIG" ]]; then
     proj_shell=$(yq -r '.shell // ""' "$PROJECT_CONFIG")
     proj_init=$(yq -r '.init // ""' "$PROJECT_CONFIG")
     proj_keep_ep=$(yq -r '.keep_entrypoint // ""' "$PROJECT_CONFIG")
+    proj_match_user=$(yq -r '.match_user // ""' "$PROJECT_CONFIG")
     proj_command=$(yq -r '.command // ""' "$PROJECT_CONFIG")
     [[ -n "$proj_service" ]] && SERVICE="$proj_service"
     [[ -n "$proj_shell" ]] && SHELL_NAME="$proj_shell"
     [[ -n "$proj_init" ]] && INIT_CMD="$proj_init"
     [[ -n "$proj_keep_ep" ]] && KEEP_ENTRYPOINT="$proj_keep_ep"
+    [[ -n "$proj_match_user" ]] && MATCH_USER="$proj_match_user"
     [[ -n "$proj_command" ]] && DIVE_COMMAND="$proj_command"
 fi
 
@@ -334,11 +340,13 @@ if [[ -f "$USER_CONFIG" ]]; then
     user_shell=$(yq -r '.shell // ""' "$USER_CONFIG")
     user_init=$(yq -r '.init // ""' "$USER_CONFIG")
     user_keep_ep=$(yq -r '.keep_entrypoint // ""' "$USER_CONFIG")
+    user_match_user=$(yq -r '.match_user // ""' "$USER_CONFIG")
     user_command=$(yq -r '.command // ""' "$USER_CONFIG")
     [[ -n "$user_service" ]] && SERVICE="$user_service"
     [[ -n "$user_shell" ]] && SHELL_NAME="$user_shell"
     [[ -n "$user_init" ]] && INIT_CMD="$user_init"
     [[ -n "$user_keep_ep" ]] && KEEP_ENTRYPOINT="$user_keep_ep"
+    [[ -n "$user_match_user" ]] && MATCH_USER="$user_match_user"
     [[ -n "$user_command" ]] && DIVE_COMMAND="$user_command"
 fi
 
@@ -409,6 +417,9 @@ cat > "$OVERRIDE_FILE" << EOF
 services:
   $SERVICE:
 EOF
+if [[ "$MATCH_USER" == "true" ]]; then
+    echo "    user: \"$(id -u):$(id -g)\"" >> "$OVERRIDE_FILE"
+fi
 if [[ "$KEEP_ENTRYPOINT" != "true" ]]; then
     cat >> "$OVERRIDE_FILE" << EOF
     entrypoint: ["sleep", "infinity"]
